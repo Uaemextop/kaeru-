@@ -7,12 +7,6 @@
 #include <board_ops.h>
 #include "include/lamu.h"
 
-void cmd_efuse_disable(const char *arg, void *data, unsigned sz) {
-    fastboot_info("eFuse protection is bypassed by kaeru");
-    fastboot_info("get_hw_sbc patched to return 0 (unfused)");
-    fastboot_okay("");
-}
-
 #ifdef FASTBOOT_CMDLIST_ADDR
 void cmd_help(const char *arg, void *data, unsigned sz) {
     struct fastboot_cmd *cmd = *(struct fastboot_cmd **)FASTBOOT_CMDLIST_ADDR;
@@ -314,7 +308,6 @@ void board_early_init(void) {
     }
 
     fastboot_register("oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
-    fastboot_register("oem efuse disable", cmd_efuse_disable, 1);
 #ifdef FASTBOOT_CMDLIST_ADDR
     fastboot_register("oem help", cmd_help, 1);
 #endif
