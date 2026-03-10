@@ -7,6 +7,10 @@
 #include <board_ops.h>
 #include "include/lamu.h"
 
+// Forward declarations for partition I/O used by commands below.
+long partition_read(const char* part_name, long long offset, uint8_t* data, size_t size);
+long partition_write(const char* part_name, long long offset, uint8_t* data, size_t size);
+
 int is_partition_protected(const char* partition) {
     if (!partition || *partition == '\0') return 1;
 
@@ -64,6 +68,117 @@ void cmd_reboot_emergency(const char* arg, void* data, unsigned sz) {
     fastboot_info("The device will reboot into bootrom mode...");
     fastboot_okay("");
     reboot_emergency();
+}
+
+#ifdef FASTBOOT_VARLIST_ADDR
+void cmd_getvar_all(const char *arg, void *data, unsigned sz) {
+    struct fastboot_var *var = *(struct fastboot_var **)FASTBOOT_VARLIST_ADDR;
+    char line[80];
+
+    if (!var) {
+        fastboot_fail("No variables found!");
+        return;
+    }
+
+    while (var) {
+        if (var->name && var->value) {
+            npf_snprintf(line, sizeof(line), "%s: %s", var->name, var->value);
+            fastboot_info(line);
+        }
+        var = var->next;
+    }
+    fastboot_okay("");
+}
+#endif
+
+#define PROINFO_SIZE 0x1000
+
+void cmd_device_info(const char *arg, void *data, unsigned sz) {
+    uint8_t buf[PROINFO_SIZE];
+    char line[80];
+
+    if (partition_read("proinfo", 0, buf, PROINFO_SIZE) < 0) {
+        fastboot_fail("failed to read proinfo");
+        return;
+    }
+
+    fastboot_info("=== Device Info (proinfo) ===");
+
+    // Proinfo is a raw binary partition. Tinno stores data at known offsets.
+    // Dump the first 256 bytes as readable ASCII fields.
+    for (int offset = 0; offset < PROINFO_SIZE; offset += 64) {
+        // Check if this 64-byte block has any printable content
+        int has_data = 0;
+        for (int j = 0; j < 64 && (offset + j) < PROINFO_SIZE; j++) {
+            if (buf[offset + j] >= 0x20 && buf[offset + j] < 0x7F) {
+                has_data = 1;
+                break;
+            }
+        }
+        if (!has_data)
+            continue;
+
+        // Build a printable string from this block
+        char field[65];
+        int len = 0;
+        for (int j = 0; j < 64 && (offset + j) < PROINFO_SIZE && len < 64; j++) {
+            uint8_t c = buf[offset + j];
+            if (c >= 0x20 && c < 0x7F)
+                field[len++] = (char)c;
+            else if (c == 0 && len > 0)
+                break;
+        }
+        field[len] = '\0';
+
+        if (len > 0) {
+            npf_snprintf(line, sizeof(line), "[0x%03X] %s", offset, field);
+            fastboot_info(line);
+        }
+    }
+
+    fastboot_okay("");
+}
+
+void cmd_oem_dmesg(const char *arg, void *data, unsigned sz) {
+    uint8_t buf[0x200];
+    int max_lines = 50;
+
+    fastboot_info("=== LK Boot Log (last messages) ===");
+
+    // Read the pllk (previous LK) log partition which stores
+    // boot log messages from the previous LK execution.
+    if (partition_read("pllk", 0, buf, sizeof(buf)) >= 0) {
+        // Parse and display log lines
+        int pos = 0;
+        int lines = 0;
+        while (pos < (int)sizeof(buf) && lines < max_lines) {
+            int start = pos;
+            while (pos < (int)sizeof(buf) && buf[pos] != '\n' && buf[pos] != 0)
+                pos++;
+
+            if (pos > start) {
+                int len = pos - start;
+                if (len > 75) len = 75;
+                char tmp[76];
+                memcpy(tmp, &buf[start], len);
+                tmp[len] = '\0';
+                fastboot_info(tmp);
+                lines++;
+            }
+
+            if (pos < (int)sizeof(buf) && (buf[pos] == '\n' || buf[pos] == 0))
+                pos++;
+            if (buf[pos] == 0 && (pos + 1 >= (int)sizeof(buf) || buf[pos + 1] == 0))
+                break;
+        }
+
+        if (lines == 0)
+            fastboot_info("(pllk log empty or not available)");
+    } else {
+        fastboot_info("pllk partition not found");
+    }
+
+    fastboot_okay("");
 }
 
 #ifdef FASTBOOT_CMDLIST_ADDR
@@ -453,11 +568,16 @@ void board_early_init(void) {
     fastboot_register("oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
     fastboot_register("oem efuse disable", cmd_efuse_disable, 1);
     fastboot_register("oem reboot-emergency", cmd_reboot_emergency, 1);
+    fastboot_register("oem device-info", cmd_device_info, 1);
+    fastboot_register("oem dmesg", cmd_oem_dmesg, 1);
 #ifdef CMD_FLASH_PATTERN
     fastboot_register("flash:", cmd_flash, 1);
 #endif
 #ifdef CMD_ERASE_PATTERN
     fastboot_register("erase:", cmd_erase, 1);
+#endif
+#ifdef FASTBOOT_VARLIST_ADDR
+    fastboot_register("oem getvar-all", cmd_getvar_all, 1);
 #endif
 #ifdef FASTBOOT_CMDLIST_ADDR
     fastboot_register("oem help", cmd_help, 1);

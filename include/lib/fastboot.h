@@ -14,6 +14,12 @@ struct fastboot_cmd {
     void (*handle)(const char* arg, void* data, unsigned int sz);
 };
 
+struct fastboot_var {
+    struct fastboot_var* next;
+    const char* name;
+    const char* value;
+};
+
 void fastboot_info(const char* reason);
 void fastboot_fail(const char* reason);
 void fastboot_okay(const char* reason);
