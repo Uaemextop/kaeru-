@@ -189,3 +189,4 @@ stageone
 
 # Keep compiled output
 !output/
+!output/**
