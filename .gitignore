@@ -186,3 +186,7 @@ kaeru
 stageone
 *-kaeru
 *.lds
+
+# Keep compiled output
+!output/
+!output/**
