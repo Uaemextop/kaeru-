@@ -7,12 +7,6 @@
 #include <board_ops.h>
 #include "include/lamu.h"
 
-void cmd_efuse_disable(const char *arg, void *data, unsigned sz) {
-    fastboot_info("eFuse protection is bypassed by kaeru");
-    fastboot_info("get_hw_sbc patched to return 0 (unfused)");
-    fastboot_okay("");
-}
-
 #ifdef FASTBOOT_CMDLIST_ADDR
 void cmd_help(const char *arg, void *data, unsigned sz) {
     struct fastboot_cmd *cmd = *(struct fastboot_cmd **)FASTBOOT_CMDLIST_ADDR;
@@ -46,6 +40,55 @@ long partition_write(const char* part_name, long long offset, uint8_t* data, siz
         return ((long (*)(const char*, long long, uint8_t*, size_t))(addr | 1))(
             part_name, offset, data, size);
     return -1;
+}
+
+// The stock "oem efuse enable" writes a 0x200-byte cryptographic token to
+// the "efuse" partition at offset 0. On the next boot, the bootloader reads
+// this token and blows the hardware eFuse, permanently fusing the device.
+//
+// "oem efuse disable" is the inverse: it zeroes out the efuse partition,
+// removing the token so the eFuse will never be blown. Combined with the
+// get_hw_sbc patch (which makes the SoC appear unfused at runtime), this
+// permanently disables all eFuse-gated security enforcement.
+#define EFUSE_PARTITION_NAME "efuse"
+#define EFUSE_TOKEN_SIZE     0x200
+
+void cmd_efuse_disable(const char *arg, void *data, unsigned sz) {
+    uint8_t buf[EFUSE_TOKEN_SIZE];
+    int has_token = 0;
+
+    // Read the current efuse partition to check if a token is present.
+    if (partition_read(EFUSE_PARTITION_NAME, 0, buf, EFUSE_TOKEN_SIZE) < 0) {
+        fastboot_fail("failed to read efuse partition");
+        return;
+    }
+
+    for (int i = 0; i < EFUSE_TOKEN_SIZE; i++) {
+        if (buf[i] != 0x00 && buf[i] != 0xFF) {
+            has_token = 1;
+            break;
+        }
+    }
+
+    if (!has_token) {
+        fastboot_info("efuse partition is already clean");
+        fastboot_info("get_hw_sbc patched to return 0 (unfused)");
+        fastboot_okay("");
+        return;
+    }
+
+    // Clear the efuse partition to remove the enable token.
+    memset(buf, 0, EFUSE_TOKEN_SIZE);
+
+    if (partition_write(EFUSE_PARTITION_NAME, 0, buf, EFUSE_TOKEN_SIZE) < 0) {
+        fastboot_fail("failed to write efuse partition");
+        return;
+    }
+
+    fastboot_info("efuse token erased successfully");
+    fastboot_info("eFuse will NOT be blown on next boot");
+    fastboot_info("get_hw_sbc patched to return 0 (unfused)");
+    fastboot_okay("");
 }
 
 static void handle_recovery_boot(void) {
