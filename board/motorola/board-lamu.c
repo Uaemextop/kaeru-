@@ -9,17 +9,19 @@
 
 #ifdef FASTBOOT_CMDLIST_ADDR
 void cmd_help(const char *arg, void *data, unsigned sz) {
-    struct fastboot_cmd *cmd = (struct fastboot_cmd *)FASTBOOT_CMDLIST_ADDR;
+    struct fastboot_cmd *cmd = *(struct fastboot_cmd **)FASTBOOT_CMDLIST_ADDR;
 
     if (!cmd) {
         fastboot_fail("No commands found!");
         return;
     }
 
-    fastboot_info("Available commands:");
+    fastboot_info("Available oem commands:");
     while (cmd) {
         if (cmd->prefix) {
-            fastboot_info(cmd->prefix);
+            if (strncmp(cmd->prefix, "oem", 3) == 0) {
+                fastboot_info(cmd->prefix);
+            }
         }
         cmd = cmd->next;
     }

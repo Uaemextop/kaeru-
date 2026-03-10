@@ -186,3 +186,6 @@ kaeru
 stageone
 *-kaeru
 *.lds
+
+# Allow built images in images/ directory
+!images/**/*.bin
