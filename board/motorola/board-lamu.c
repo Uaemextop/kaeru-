@@ -7,6 +7,65 @@
 #include <board_ops.h>
 #include "include/lamu.h"
 
+int is_partition_protected(const char* partition) {
+    if (!partition || *partition == '\0') return 1;
+
+    while (*partition && ISSPACE(*partition)) {
+        partition++;
+    }
+
+    if (*partition == '\0') return 1;
+
+    // These partitions are critical—flashing them incorrectly can lead to a hard brick.
+    // To prevent accidental damage, we mark them as protected and block write access.
+    if (strcmp(partition, "boot0") == 0 || strcmp(partition, "boot1") == 0 ||
+        strcmp(partition, "boot2") == 0 || strcmp(partition, "partition") == 0 ||
+        strcmp(partition, "preloader") == 0 || strcmp(partition, "preloader_a") == 0 ||
+        strcmp(partition, "preloader_b") == 0) {
+        return 1;
+    }
+
+    return 0;
+}
+
+#ifdef CMD_FLASH_PATTERN
+void cmd_flash(const char* arg, void* data, unsigned sz) {
+    if (is_partition_protected(arg)) {
+        fastboot_fail("Partition is protected");
+        return;
+    }
+
+    uint32_t addr = SEARCH_PATTERN(LK_START, LK_END, CMD_FLASH_PATTERN);
+    if (addr) {
+        ((void (*)(const char* arg, void* data, unsigned sz))(addr | 1))(arg, data, sz);
+    } else {
+        fastboot_fail("Unable to find original cmd_flash");
+    }
+}
+#endif
+
+#ifdef CMD_ERASE_PATTERN
+void cmd_erase(const char* arg, void* data, unsigned sz) {
+    if (is_partition_protected(arg)) {
+        fastboot_fail("Partition is protected");
+        return;
+    }
+
+    uint32_t addr = SEARCH_PATTERN(LK_START, LK_END, CMD_ERASE_PATTERN);
+    if (addr) {
+        ((void (*)(const char* arg, void* data, unsigned sz))(addr | 1))(arg, data, sz);
+    } else {
+        fastboot_fail("Unable to find original cmd_erase");
+    }
+}
+#endif
+
+void cmd_reboot_emergency(const char* arg, void* data, unsigned sz) {
+    fastboot_info("The device will reboot into bootrom mode...");
+    fastboot_okay("");
+    reboot_emergency();
+}
+
 #ifdef FASTBOOT_CMDLIST_ADDR
 void cmd_help(const char *arg, void *data, unsigned sz) {
     struct fastboot_cmd *cmd = *(struct fastboot_cmd **)FASTBOOT_CMDLIST_ADDR;
@@ -344,6 +403,41 @@ void board_early_init(void) {
     }
 #endif
 
+    // The default flash and erase commands perform no safety checks, allowing
+    // writes to critical partitions, like the Preloader, which can easily brick
+    // the device.
+    //
+    // To prevent this, we disable the original handlers and replace them with
+    // custom wrappers that verify whether the target partition is protected.
+#ifdef FLASH_REGISTER_PATTERN
+    addr = SEARCH_PATTERN(LK_START, LK_END, FLASH_REGISTER_PATTERN);
+    if (addr) {
+        printf("Found cmd_flash_register at 0x%08X\n", addr);
+        NOP(addr, 2);
+    }
+#endif
+
+#ifdef ERASE_REGISTER_PATTERN
+    addr = SEARCH_PATTERN(LK_START, LK_END, ERASE_REGISTER_PATTERN);
+    if (addr) {
+        printf("Found cmd_erase_register at 0x%08X\n", addr);
+        NOP(addr, 2);
+    }
+#endif
+
+    // Disables the `fastboot flashing lock` command to prevent accidental hard bricks.
+    //
+    // Locking while running a custom or modified LK image can leave the device in an
+    // unbootable state after reboot, since the expected secure environment is no longer
+    // present.
+#ifdef FLASHING_LOCK_REGISTER_PATTERN
+    addr = SEARCH_PATTERN(LK_START, LK_END, FLASHING_LOCK_REGISTER_PATTERN);
+    if (addr) {
+        printf("Found cmd_flashing_lock_register at 0x%08X\n", addr);
+        NOP(addr, 2);
+    }
+#endif
+
     // The environment area isn't initialized yet when board_early_init
     // runs, so any get_env calls would return NULL at this stage. We
     // hook a printf call in platform_init that runs right after env
@@ -358,6 +452,13 @@ void board_early_init(void) {
 
     fastboot_register("oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
     fastboot_register("oem efuse disable", cmd_efuse_disable, 1);
+    fastboot_register("oem reboot-emergency", cmd_reboot_emergency, 1);
+#ifdef CMD_FLASH_PATTERN
+    fastboot_register("flash:", cmd_flash, 1);
+#endif
+#ifdef CMD_ERASE_PATTERN
+    fastboot_register("erase:", cmd_erase, 1);
+#endif
 #ifdef FASTBOOT_CMDLIST_ADDR
     fastboot_register("oem help", cmd_help, 1);
 #endif
@@ -382,4 +483,15 @@ void board_late_init(void) {
         printf("Found orange_state_warning at 0x%08X\n", addr);
         FORCE_RETURN(addr, 0);
     }
+
+    // As an extra safeguard, we manually disable factory mode by calling the
+    // relevant update function directly. This ensures the mode is turned off,
+    // even if it was set by another part of the bootloader.
+#ifdef TINNO_FACMODE_UPDATE_PATTERN
+    addr = SEARCH_PATTERN(LK_START, LK_END, TINNO_FACMODE_UPDATE_PATTERN);
+    if (addr) {
+        printf("Found tinno_facmode_update at 0x%08X\n", addr);
+        ((int (*)(int, int))(addr | 1))(0, 0);
+    }
+#endif
 }
