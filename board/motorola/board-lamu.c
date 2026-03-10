@@ -122,6 +122,17 @@ static void spoof_lock_state(void) {
         PATCH_MEM(addr + 0xF0, 0xE006);
     }
 
+    // Tinno's SSM (Smart Security Management) and OEM config commands
+    // check a BSS flag to determine whether the caller has permission.
+    // The flag is read by a tiny function that returns 0 (denied) unless
+    // the flag is set to a non-zero value. Setting it to 1 unconditionally
+    // grants permission for all SSM and OEM config operations (carrier,
+    // thinkshield, zerotouch, etc.).
+#ifdef TINNO_SSM_PERMISSION_ADDR
+    printf("Setting SSM permission flag at 0x%08X\n", TINNO_SSM_PERMISSION_ADDR);
+    WRITE32(TINNO_SSM_PERMISSION_ADDR, 1);
+#endif
+
     int spoofing = is_spoofing_enabled();
     fastboot_publish("is-spoofing", spoofing ? "1" : "0");
 
@@ -225,6 +236,32 @@ void board_early_init(void) {
     addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0xF7FF, 0xFFF9, 0xB908);
     if (addr) {
         printf("Found secure_state_check at 0x%08X\n", addr);
+        FORCE_RETURN(addr, 0);
+    }
+
+    // get_hw_sbc() reads the hardware Secure Boot Controller register to
+    // determine whether the SoC has been fused. When it returns non-zero,
+    // multiple security checks across LK treat the device as secure and
+    // block OEM config and SSM operations with "[non-secure] failed".
+    //
+    // Patching it to always return 0 makes the device appear unfused,
+    // bypassing all SBC-gated checks throughout the bootloader.
+    addr = SEARCH_PATTERN(LK_START, LK_END, 0x2360, 0xF2C1, 0x13CE, 0x6818);
+    if (addr) {
+        printf("Found get_hw_sbc at 0x%08X\n", addr);
+        FORCE_RETURN(addr, 0);
+    }
+
+    // tinno_facmode_init() initializes the factory mode state based on the
+    // hardware SBC register value. When get_hw_sbc indicates a fused device,
+    // this function sets flags that force the bootloader into factory mode
+    // on subsequent boots.
+    //
+    // Disabling it prevents factory mode from being erroneously activated
+    // after patching get_hw_sbc.
+    addr = SEARCH_PATTERN(LK_START, LK_END, 0xE92D, 0x41F0, 0xB084, 0x4D28);
+    if (addr) {
+        printf("Found tinno_facmode_init at 0x%08X\n", addr);
         FORCE_RETURN(addr, 0);
     }
 
