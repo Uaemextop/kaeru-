@@ -7,6 +7,12 @@
 #include <board_ops.h>
 #include "include/lamu.h"
 
+void cmd_efuse_disable(const char *arg, void *data, unsigned sz) {
+    fastboot_info("eFuse protection is bypassed by kaeru");
+    fastboot_info("get_hw_sbc patched to return 0 (unfused)");
+    fastboot_okay("");
+}
+
 #ifdef FASTBOOT_CMDLIST_ADDR
 void cmd_help(const char *arg, void *data, unsigned sz) {
     struct fastboot_cmd *cmd = *(struct fastboot_cmd **)FASTBOOT_CMDLIST_ADDR;
@@ -277,6 +283,24 @@ void board_early_init(void) {
         FORCE_RETURN(addr, 0);
     }
 
+    // tinno_carrier_validate() checks a carrier string against a
+    // region-specific whitelist. It uses a switch on the carrier group
+    // value to select the appropriate list, then iterates through the
+    // entries comparing with strncmp. If the carrier is not found in the
+    // list, it returns non-zero, causing the "oem config carrier" command
+    // to respond with "[non-secure] failed".
+    //
+    // Patching it to always return 0 makes the bootloader accept any
+    // carrier string, including ones not in the original whitelist (e.g.
+    // "openmx" which is not present in the factory carrier table).
+#ifdef TINNO_CARRIER_VALIDATE_PATTERN
+    addr = SEARCH_PATTERN(LK_START, LK_END, TINNO_CARRIER_VALIDATE_PATTERN);
+    if (addr) {
+        printf("Found tinno_carrier_validate at 0x%08X\n", addr);
+        FORCE_RETURN(addr, 0);
+    }
+#endif
+
     // The environment area isn't initialized yet when board_early_init
     // runs, so any get_env calls would return NULL at this stage. We
     // hook a printf call in platform_init that runs right after env
@@ -290,6 +314,7 @@ void board_early_init(void) {
     }
 
     fastboot_register("oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
+    fastboot_register("oem efuse disable", cmd_efuse_disable, 1);
 #ifdef FASTBOOT_CMDLIST_ADDR
     fastboot_register("oem help", cmd_help, 1);
 #endif
