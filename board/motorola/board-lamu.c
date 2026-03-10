@@ -7,6 +7,26 @@
 #include <board_ops.h>
 #include "include/lamu.h"
 
+#ifdef FASTBOOT_CMDLIST_ADDR
+void cmd_help(const char *arg, void *data, unsigned sz) {
+    struct fastboot_cmd *cmd = (struct fastboot_cmd *)FASTBOOT_CMDLIST_ADDR;
+
+    if (!cmd) {
+        fastboot_fail("No commands found!");
+        return;
+    }
+
+    fastboot_info("Available commands:");
+    while (cmd) {
+        if (cmd->prefix) {
+            fastboot_info(cmd->prefix);
+        }
+        cmd = cmd->next;
+    }
+    fastboot_okay("");
+}
+#endif
+
 long partition_read(const char* part_name, long long offset, uint8_t* data, size_t size) {
     return ((long (*)(const char*, long long, uint8_t*, size_t))(CONFIG_PARTITION_READ_ADDRESS | 1))(
             part_name, offset, data, size);
@@ -231,6 +251,9 @@ void board_early_init(void) {
     }
 
     fastboot_register("oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
+#ifdef FASTBOOT_CMDLIST_ADDR
+    fastboot_register("oem help", cmd_help, 1);
+#endif
 }
 
 void board_late_init(void) {
