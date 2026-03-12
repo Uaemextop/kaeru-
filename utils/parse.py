@@ -388,7 +388,9 @@ def main():
 
     write_cfg(args.defconfig, cfg)
 
-    # Run Capstone-based analysis for device-specific hints
+    # Run Capstone-based analysis for device-specific hints.
+    # The LK image has a 0x200-byte header, so the file-offset base
+    # is `base - 0x200` (same adjustment used for find_offsets above).
     analyze_lamu_patterns(lk, base - 0x200, offsets, cfg)
 
     print('#')
