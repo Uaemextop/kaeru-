@@ -108,18 +108,49 @@ static void spoof_lock_state(void) {
     // Even without spoofing, we patch these out as a safety measure
     // since OEM-specific checks could still interfere with fastboot
     // commands in unexpected ways.
-    addr = SEARCH_PATTERN(LK_START, LK_END, 0xE92D, 0x4880, 0xB087, 0x4D5A);
+    //
+    // Instead of patching at hardcoded offsets within the function
+    // (which break across firmware versions), we use DECODE_BL_TARGET
+    // to dynamically locate the BL calls to fastboot_fail inside
+    // the security check section and NOP them out.
+    addr = SEARCH_PATTERN(LK_START, LK_END, 0xE92D, 0x4880, 0xB087);
     if (addr) {
         printf("Found fastboot command processor at 0x%08X\n", addr);
-        
-        // "not support on security" call
-        NOP(addr + 0x15A, 2);
 
-        // "not allowed in locked state" call
-        NOP(addr + 0x166, 2);
-        
-        // Jump directly to command handler
-        PATCH_MEM(addr + 0xF0, 0xE006);
+        uint32_t fail_target = CONFIG_FASTBOOT_FAIL_ADDRESS & ~1;
+        int nop_count = 0;
+
+        for (uint32_t a = addr; a < addr + 0x300 && nop_count < 2; a += 2) {
+            uint16_t hi = READ16(a);
+            uint16_t lo = READ16(a + 2);
+
+            if ((hi & 0xF800) != 0xF000 || (lo & 0xD000) != 0xD000)
+                continue;
+
+            if ((DECODE_BL_TARGET(a) & ~1) == fail_target) {
+                printf("NOPing security BL at 0x%08X\n", a);
+                NOP(a, 2);
+                nop_count++;
+            }
+        }
+
+        // Find the conditional branch that gates command execution
+        // behind the security check and make it unconditional so
+        // commands are always processed.
+        for (uint32_t a = addr; a < addr + 0x200; a += 2) {
+            uint16_t instr = READ16(a);
+
+            if ((instr & 0xF000) == 0xD000 && (instr & 0x0F00) != 0x0E00
+                && (instr & 0x0F00) != 0x0F00) {
+                uint8_t offset = instr & 0xFF;
+
+                if (offset >= 0x04 && offset <= 0x10) {
+                    printf("Patching conditional branch at 0x%08X\n", a);
+                    PATCH_MEM(a, 0xE000 | offset);
+                    break;
+                }
+            }
+        }
     }
 
     // Tinno's SSM (Smart Security Management) and OEM config commands
@@ -147,13 +178,39 @@ static void spoof_lock_state(void) {
     // keeps showing "unlocked" even when we want it to say "locked".
     // This patch forces the cmdline to always use the "locked"
     // string instead of checking the actual device state.
-    addr = SEARCH_PATTERN(LK_START, LK_END, 0xE92D, 0x4FF0, 0x4691, 0xF102);
+    //
+    // We search for a BL to get_lock_state (the function whose thunk
+    // we patched above) inside the AVB cmdline builder and NOP it
+    // plus the following conditional so libavb always takes the
+    // "locked" path.
+    addr = SEARCH_PATTERN(LK_START, LK_END, 0xE92D, 0x4FF0, 0x4691);
     if (addr) {
         printf("Found AVB cmdline function at 0x%08X\n", addr);
-        
-        // NOP out the code that checks the actual device state,
-        // forcing libavb to always use the "locked" string.
-        NOP(addr + 0x9C, 4);
+
+        // Search within the function for a BL whose target eventually
+        // reaches seccfg_get_lock_state (the function we redirected
+        // via LOCK_STATE_PATTERN). Instead of a fragile hardcoded
+        // offset, we look for a sequence of BL + CMP + Bcc that forms
+        // the device-state check and NOP the entire block.
+        int patched = 0;
+        for (uint32_t a = addr; a < addr + 0x200 && !patched; a += 2) {
+            uint16_t hi = READ16(a);
+            uint16_t lo = READ16(a + 2);
+
+            if ((hi & 0xF800) != 0xF000 || (lo & 0xD000) != 0xD000)
+                continue;
+
+            // After the BL, look for a CMP + Bcc pair (device state check)
+            uint16_t after1 = READ16(a + 4);
+            uint16_t after2 = READ16(a + 6);
+
+            // CMP Rn, #imm (0x2800-0x2FFF) followed by Bcc (0xD000-0xDFFF)
+            if ((after1 & 0xF800) == 0x2800 && (after2 & 0xF000) == 0xD000) {
+                printf("NOPing device state check at 0x%08X\n", a);
+                NOP(a, 4);
+                patched = 1;
+            }
+        }
     }
 
     // When booting into recovery, we need to ensure verifiedbootstate
@@ -173,25 +230,39 @@ static void spoof_lock_state(void) {
     // reject the boot if the key doesn't match, causing the "Public key
     // used to sign data rejected" error. We patch both checks so any
     // key is accepted regardless.
-    addr = SEARCH_PATTERN(LK_START, LK_END, 0xF47F, 0xAE6B, 0xE688, 0xF8DD);
+    //
+    // Instead of using hardcoded offsets (which break across firmware
+    // versions and can corrupt unrelated code), we search for the
+    // specific instructions dynamically within the function body.
+    addr = SEARCH_PATTERN(LK_START, LK_END, 0xF47F, 0xAE6B);
     if (addr) {
         printf("Found load_and_verify_vbmeta at 0x%08X\n", addr);
-
-        // The chain key check first compares key lengths before calling
-        // memcmp. If lengths differ, it skips memcmp and falls straight
-        // to the error path. Change "cmp r2, r3" to "cmp r3, r3" so the
-        // length check always succeeds, allowing execution to reach the
-        // memcmp path (which we NOP below).
-        PATCH_MEM(addr - 0x32C, 0x451B);
 
         // NOP the bne.w that rejects mismatched chained vbmeta keys,
         // falling through to the success path unconditionally.
         NOP(addr, 2);
 
-        // Replace "cmp r3, #0" with "movs r3, #1" so key_is_trusted
-        // is always nonzero and the following bne.w takes the success
-        // branch.
-        PATCH_MEM(addr + 0x72, 0x2301);
+        // Search backward for "cmp r3, r2" (0x4513) which compares
+        // chain key lengths before memcmp. Change to "cmp r3, r3"
+        // (0x451B) so the length check always succeeds.
+        for (uint32_t a = addr - 2; a > addr - 0x500 && a > LK_START; a -= 2) {
+            if (READ16(a) == 0x4513) {
+                printf("Found chain key length CMP at 0x%08X\n", a);
+                PATCH_MEM(a, 0x451B);
+                break;
+            }
+        }
+
+        // Search forward for "cmp r3, #0" (0x2B00) which checks
+        // key_is_trusted. Replace with "movs r3, #1" (0x2301) so
+        // key_is_trusted is always nonzero.
+        for (uint32_t a = addr + 2; a < addr + 0x100 && a < LK_END; a += 2) {
+            if (READ16(a) == 0x2B00) {
+                printf("Found key_is_trusted CMP at 0x%08X\n", a);
+                PATCH_MEM(a, 0x2301);
+                break;
+            }
+        }
     }
 }
 
@@ -209,10 +280,29 @@ void board_early_init(void) {
     // verification for all partitions and firmware images (boot,
     // recovery, dtbo, SCP, etc.) so the device can boot with
     // modified or unsigned images.
-    addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0xF7FF, 0xFF63, 0xF3C0);
+    //
+    // The function calls sec_policy_checker and then extracts a
+    // bitfield from the result. We find it by searching for the
+    // stable prologue + bitfield extraction (UBFX) that follows
+    // the BL.
+    addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0xF7FF);
     if (addr) {
-        printf("Found get_vfy_policy at 0x%08X\n", addr);
-        FORCE_RETURN(addr, 0);
+        // Verify the instruction after the BL is UBFX (0xF3C0)
+        uint16_t after_bl = READ16(addr + 4);
+        if (after_bl == 0xF3C0) {
+            printf("Found get_vfy_policy at 0x%08X\n", addr);
+            FORCE_RETURN(addr, 0);
+        } else {
+            addr = 0;
+        }
+    }
+    // Fallback: try original 4-instruction pattern
+    if (!addr) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0xF7FF, 0xFF63, 0xF3C0);
+        if (addr) {
+            printf("Found get_vfy_policy (fallback) at 0x%08X\n", addr);
+            FORCE_RETURN(addr, 0);
+        }
     }
 
     // Tinno (the ODM) added a post app() check that forcefully
@@ -233,10 +323,30 @@ void board_early_init(void) {
     //
     // We patch it to always return false so that all fastboot commands
     // remain accessible regardless of the device's actual secure state.
+    // The pattern B508 (PUSH {R3,LR}) + F7FF (BL nearby) is the
+    // prologue. We verify by checking for CBZ/CBNZ (B908/B900) after
+    // the BL return.
     addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0xF7FF, 0xFFF9, 0xB908);
     if (addr) {
         printf("Found secure_state_check at 0x%08X\n", addr);
         FORCE_RETURN(addr, 0);
+    }
+    if (!addr) {
+        // Fallback: search with relaxed BL encoding — prologue + CBNZ
+        for (uint32_t a = LK_START; a < LK_END - 8; a += 2) {
+            if (READ16(a) == 0xB508) {
+                uint16_t w1 = READ16(a + 2);
+                // BL to nearby function: F7FF or F7FE
+                if ((w1 & 0xFFFE) == 0xF7FE || w1 == 0xF7FF) {
+                    uint16_t w3 = READ16(a + 6);
+                    if (w3 == 0xB908 || w3 == 0xB900) {
+                        printf("Found secure_state_check (relaxed) at 0x%08X\n", a);
+                        FORCE_RETURN(a, 0);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // get_hw_sbc() reads the hardware Secure Boot Controller register to
