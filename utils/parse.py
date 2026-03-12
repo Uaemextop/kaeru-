@@ -210,6 +210,122 @@ def find_string(lk, string):
     return lk.find(bytes(string, 'latin1'))
 
 
+def find_bl_targets(lk, func_addr, base, count=16):
+    """
+    Use Capstone to disassemble a function and find all BL/BLX targets.
+    Returns a list of (call_addr, target_addr) tuples.
+    """
+    md = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
+    off = (func_addr & ~1) - base
+    targets = []
+    for a, _, m, o in md.disasm_lite(lk[off : off + 512], func_addr & ~1):
+        if m in ('bl', 'blx') and o.startswith('#'):
+            targets.append((a, int(o.strip('#'), 0)))
+            if len(targets) >= count:
+                break
+    return targets
+
+
+def find_pc_relative_loads(lk, func_addr, base, max_bytes=256):
+    """
+    Use Capstone to find PC-relative LDR instructions within a function.
+    Resolves the loaded address from the literal pool.
+    Returns a list of (instr_addr, register, resolved_value) tuples.
+    """
+    md = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
+    off = (func_addr & ~1) - base
+    results = []
+    for a, sz, m, o in md.disasm_lite(lk[off : off + max_bytes], func_addr & ~1):
+        if m == 'ldr' and '[pc' in o:
+            # Parse the PC-relative offset from operand like "r0, [pc, #0x10]"
+            parts = o.replace(']', '').replace('[', '').split(',')
+            if len(parts) >= 3:
+                reg = parts[0].strip()
+                try:
+                    imm = int(parts[2].strip().strip('#'), 0)
+                    # Thumb PC is aligned to 4 bytes and offset by 4
+                    load_addr = ((a + 4) & ~3) + imm
+                    pool_off = load_addr - base
+                    if 0 <= pool_off < len(lk) - 4:
+                        value = struct.unpack('<I', lk[pool_off:pool_off + 4])[0]
+                        results.append((a, reg, value))
+                except (ValueError, IndexError):
+                    pass
+    return results
+
+
+def find_got_entry(lk, func_addr, base, target_name=None):
+    """
+    Resolve a GOT-based function pointer. Many MediaTek LK functions
+    are called through a GOT entry: the caller loads the GOT address
+    via a PC-relative LDR, then loads the actual function pointer from
+    the GOT slot.
+
+    Returns the resolved function address, or None.
+    """
+    loads = find_pc_relative_loads(lk, func_addr, base)
+    for _, reg, value in loads:
+        off = value - base
+        if 0 <= off < len(lk) - 4:
+            ptr = struct.unpack('<I', lk[off:off + 4])[0]
+            if base <= ptr < base + len(lk):
+                return ptr
+    return None
+
+
+def analyze_lamu_patterns(lk, base, offsets, cfg):
+    """
+    Use Capstone to detect lamu-specific addresses that parse.py
+    cannot find through simple pattern matching:
+    - BSS addresses (cmdline buffers, fastboot cmdlist, SSM permission)
+    - BL-relative patterns for lamu.h
+
+    This provides hints that the user can verify manually.
+    """
+    md = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
+
+    print('#')
+    print('# Lamu-specific analysis (Capstone-based):')
+    print('#')
+
+    # Find fastboot_register to determine cmdlist address.
+    # fastboot_register stores commands in a linked list whose head
+    # is a BSS variable. The first PC-relative LDR in the function
+    # loads the GOT entry pointing to that variable.
+    if 'fastboot_register' in offsets:
+        reg_addr = offsets['fastboot_register']['offset']
+        loads = find_pc_relative_loads(lk, reg_addr, base, max_bytes=128)
+        for _, reg, value in loads:
+            got_off = value - base
+            if 0 <= got_off < len(lk) - 4:
+                ptr = struct.unpack('<I', lk[got_off:got_off + 4])[0]
+                if ptr > base + len(lk):
+                    print('# FASTBOOT_CMDLIST_ADDR=0x%X (BSS, from fastboot_register GOT)' % ptr)
+                    cfg['# FASTBOOT_CMDLIST_ADDR'] = '0x%X' % ptr
+                    break
+
+    # Detect the lock state thunk pattern.
+    # seccfg_get_lock_state is typically reached through a short thunk
+    # (a single B.W instruction). We can find it by looking for B.W
+    # instructions that are exactly 4 bytes (one Thumb-2 instruction)
+    # followed by another function or data.
+    if 'fastboot_continue' in offsets:
+        fc_addr = offsets['fastboot_continue']['offset']
+        # fastboot_continue references the boot mode variable
+        loads = find_pc_relative_loads(lk, fc_addr, base, max_bytes=64)
+        for _, reg, value in loads:
+            if value > base + len(lk):
+                print('# Possible BOOTMODE_ADDRESS=0x%X (BSS, from fastboot_continue)' % value)
+                break
+
+    print('#')
+    print('# To update lamu.h patterns, use Capstone to disassemble')
+    print('# the functions above and extract the Thumb instruction')
+    print('# sequences. Avoid BL/B.W instructions in patterns as')
+    print('# their offsets change between firmware versions.')
+    print('#')
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument('lk', help='LK image file')
@@ -271,6 +387,11 @@ def main():
             cfg[key] = '0x%X' % addr
 
     write_cfg(args.defconfig, cfg)
+
+    # Run Capstone-based analysis for device-specific hints.
+    # The LK image has a 0x200-byte header, so the file-offset base
+    # is `base - 0x200` (same adjustment used for find_offsets above).
+    analyze_lamu_patterns(lk, base - 0x200, offsets, cfg)
 
     print('#')
     print('# WARNING: These addresses are automatically detected and may not be 100% accurate.')
