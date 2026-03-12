@@ -164,6 +164,15 @@ menu "Environment Support"
             hex "set_env() address"
             help
               Address of the set_env() function in the bootloader
+
+        config ENV_DATA_ADDR
+            hex "Environment data pointer address"
+            default 0x0
+            help
+              Address of the pointer to the env data buffer in BSS.
+              This is env_table[0].data (offset +8 from env_table start).
+              The buffer contains key=value pairs separated by null bytes.
+              Set to 0 to disable the printall subcommand.
     endif
 endmenu
 

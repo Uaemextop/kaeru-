@@ -125,10 +125,39 @@ void cmd_env(const char *arg, void *data, unsigned sz) {
         return;
     }
 
+#if defined(CONFIG_ENV_DATA_ADDR) && CONFIG_ENV_DATA_ADDR != 0
+    if (match_subcmd(arg, "printall", 8)) {
+        char **data_ptr = (char **)CONFIG_ENV_DATA_ADDR;
+        char *data = *data_ptr;
+
+        if (!data || *data == '\0') {
+            fastboot_fail("Environment is empty or not initialized");
+            return;
+        }
+
+        int count = 0;
+        char *p = data;
+        while (*p && (p - data) < 0x4000) {
+            fastboot_info(p);
+            count++;
+            while (*p) p++;
+            p++;
+        }
+
+        npf_snprintf(msg, sizeof(msg), "%d variable(s)", count);
+        fastboot_info(msg);
+        fastboot_okay("");
+        return;
+    }
+#endif
+
     fastboot_info("kaeru environment variable control");
     fastboot_info("");
     fastboot_info("Commands:");
     fastboot_info("  get <key>         - Get a variable");
     fastboot_info("  set <key> <value> - Set a variable");
-    fastboot_fail("Usage: fastboot oem env <get|set>");
+#if defined(CONFIG_ENV_DATA_ADDR) && CONFIG_ENV_DATA_ADDR != 0
+    fastboot_info("  printall          - Show all variables");
+#endif
+    fastboot_fail("Usage: fastboot oem env <command>");
 }
