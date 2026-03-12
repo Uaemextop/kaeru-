@@ -119,12 +119,6 @@ menu "Device Support"
         help
           Say Y if you want to include support for Nokia 2.3
 
-    config MOTOROLA_LAMU
-        bool "Support Motorola G15 / G05"
-        default n
-        help
-          Say Y if you want to include support for Motorola G15 / G05
-
     config ENERGY_PHONE_COLORS
         bool "Support Energy Phone Colors"
         default n
@@ -311,6 +305,12 @@ menu "Device Support"
         default n
         help
           Say Y if you want to include support for Honor 90 Lite
+
+    config MOTOROLA_LAMU
+        bool "Support Motorola G15 / G05"
+        default n
+        help
+          Say Y if you want to include support for Motorola G15 / G05
 
     config MOTOROLA_LAMULG
         bool "Support Motorola E15"
