@@ -404,7 +404,8 @@ void board_late_init(void) {{
         return codename, model, vendor, lk_path, soc
 
     def run(
-        self, codename=None, model=None, vendor=None, lk_path=None, soc=None
+        self, codename=None, model=None, vendor=None, lk_path=None, soc=None,
+        force=False
     ):
         if not codename or not model or not vendor or not lk_path or not soc:
             codename, model, vendor, lk_path, soc = self.interactive_mode()
@@ -431,8 +432,40 @@ void board_late_init(void) {{
         vendor_upper = self.to_upper(vendor)
         codename_upper = self.to_upper(codename)
 
+        if force:
+            self.log('INFO', 'Force mode enabled, regenerating defconfig only')
+
+            existing_defconfig = self.find_existing_defconfig(codename)
+            if not existing_defconfig:
+                self.log(
+                    'ERROR',
+                    f'No existing defconfig found for {codename}, '
+                    'cannot regenerate (run without --force to create a new device)',
+                )
+                return 1
+
+            self.log('INFO', f'Regenerating defconfig: {existing_defconfig}')
+
+            if not self.create_defconfig(
+                codename, vendor, lk_path, soc_internal,
+                vendor_subdir=existing_defconfig.parent != self.CONFIGS_DIR,
+            ):
+                self.log('ERROR', 'Failed to regenerate defconfig, exiting')
+                return 1
+
+            self.log('SUCCESS', 'Defconfig regenerated successfully')
+            self.log(
+                'INFO',
+                f'You can now build using: ./build.sh {codename} <lk_path>',
+            )
+            return 0
+
         if not self.check_existing_device(codename_upper, vendor_upper):
             self.log('ERROR', 'Device already exists, exiting')
+            self.log(
+                'INFO',
+                'Use --force to regenerate the defconfig for an existing device',
+            )
             return 1
 
         if not self.check_soc_exists(soc):
@@ -486,6 +519,10 @@ def parse_arguments():
     parser.add_argument(
         '-d', '--debug', action='store_true', help='Enable debug output'
     )
+    parser.add_argument(
+        '-f', '--force', action='store_true',
+        help='Force regeneration of defconfig for an existing device'
+    )
 
     return parser.parse_args()
 
@@ -502,6 +539,7 @@ def main():
             vendor=args.vendor,
             lk_path=args.lk,
             soc=args.soc,
+            force=args.force,
         )
     except KeyboardInterrupt:
         setup.log('ERROR', 'Process interrupted by user')
