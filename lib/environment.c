@@ -151,6 +151,33 @@ void cmd_env(const char *arg, void *data, unsigned sz) {
     }
 #endif
 
+    if (match_subcmd(arg, "listkeys", 8)) {
+        static const char *known_keys[] = {
+            "bootmode", "boot_mode", "off-mode-charge",
+            "serialno", "MTK_DEVICE_ID",
+            "unlock_erase", "warranty",
+            "scp", "scp_ap_uart", "scpctl",
+            "usb2jtag", "md_udc",
+            "logo-offset", "logo-offset-ext",
+            "kaeru_bootloader_spoof_status",
+        };
+        int total = sizeof(known_keys) / sizeof(known_keys[0]);
+
+        for (int i = 0; i < total; i++) {
+            char *result = get_env((char *)known_keys[i]);
+            if (result)
+                npf_snprintf(msg, sizeof(msg), "%s=%s", known_keys[i], result);
+            else
+                npf_snprintf(msg, sizeof(msg), "%s=(not set)", known_keys[i]);
+            fastboot_info(msg);
+        }
+
+        npf_snprintf(msg, sizeof(msg), "%d key(s) checked", total);
+        fastboot_info(msg);
+        fastboot_okay("");
+        return;
+    }
+
     fastboot_info("kaeru environment variable control");
     fastboot_info("");
     fastboot_info("Commands:");
@@ -159,5 +186,6 @@ void cmd_env(const char *arg, void *data, unsigned sz) {
 #if defined(CONFIG_ENV_DATA_ADDR) && CONFIG_ENV_DATA_ADDR != 0
     fastboot_info("  printall          - Show all variables");
 #endif
+    fastboot_info("  listkeys          - Show known keys and values");
     fastboot_fail("Usage: fastboot oem env <command>");
 }
